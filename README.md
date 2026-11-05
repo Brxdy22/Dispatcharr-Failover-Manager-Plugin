@@ -1,3 +1,5 @@
+<img src="logo.png" alt="" width="96">
+
 # VOD Failover
 
 A plugin for [Dispatcharr](https://github.com/Dispatcharr/Dispatcharr).
