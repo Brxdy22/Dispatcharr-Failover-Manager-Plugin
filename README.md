@@ -6,6 +6,8 @@ A plugin for [Dispatcharr](https://github.com/Dispatcharr/Dispatcharr).
 
 When a VOD stream fails to start on one provider account (for example HTTP 458, 404 or a timeout), this retries the same title on the next account that carries it. It remembers the failure, so later requests go straight to a working account.
 
+Tested on Dispatcharr 0.33.0.
+
 ## Install
 
 Copy this repository's files into `/data/plugins/vod_failover` in your Dispatcharr data folder, then enable **VOD Failover** on the Plugins page.
