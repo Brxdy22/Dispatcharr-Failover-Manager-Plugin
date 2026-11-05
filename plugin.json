@@ -1,0 +1,76 @@
+{
+  "name": "VOD Failover",
+  "version": "1.4.0",
+  "description": "When a VOD stream fails to start on one provider account (e.g. HTTP 458 connection limit, 404, timeout), retries the same title on the next account that carries it, and remembers the failure so later requests go straight to a working account.",
+  "author": "brxdy",
+  "license": "MIT",
+  "repo_url": "https://github.com/Brxdy22/Dispatcharr-VOD-Failover-Plugin",
+  "fields": [
+    {
+      "id": "enabled",
+      "label": "Enable failover",
+      "type": "boolean",
+      "default": true,
+      "help_text": "Master switch.",
+      "description": "Master switch."
+    },
+    {
+      "id": "fail_ttl_minutes",
+      "label": "Remember failures for (minutes)",
+      "type": "number",
+      "default": 5,
+      "help_text": "How long a failed account/stream is skipped for that title (404s, timeouts, server errors).",
+      "description": "How long a failed account/stream is skipped for that title (404s, timeouts, server errors)."
+    },
+    {
+      "id": "limit_ttl_seconds",
+      "label": "Remember connection-limit errors for (seconds)",
+      "type": "number",
+      "default": 60,
+      "help_text": "458/429 'max connections' errors are usually the provider still counting a just-closed connection.",
+      "description": "458/429 'max connections' errors are usually the provider still counting a just-closed connection."
+    },
+    {
+      "id": "preempt_idle_downloads",
+      "label": "Free busy accounts by cancelling unwatched Streamcache downloads",
+      "type": "boolean",
+      "default": true,
+      "help_text": "When every account carrying a title is at capacity, cancel Streamcache background downloads that have no viewers, then retry.",
+      "description": "When every account carrying a title is at capacity, cancel Streamcache background downloads that have no viewers, then retry."
+    },
+    {
+      "id": "streamcache_url",
+      "label": "Streamcache URL (as seen from Dispatcharr)",
+      "type": "string",
+      "default": "http://127.0.0.1:8080",
+      "help_text": "Used only to list and cancel unwatched downloads.",
+      "description": "Used only to list and cancel unwatched downloads."
+    },
+    {
+      "id": "max_attempts",
+      "label": "Max attempts per request",
+      "type": "number",
+      "default": 4,
+      "help_text": "Total upstream attempts (including the first) before giving up on a request.",
+      "description": "Total upstream attempts (including the first) before giving up on a request."
+    }
+  ],
+  "actions": [
+    {
+      "id": "status_check",
+      "label": "Check Hook Status",
+      "description": "Show whether the failover hooks are installed and how many failures are remembered.",
+      "button_label": "Check Status",
+      "button_variant": "filled",
+      "button_color": "blue"
+    },
+    {
+      "id": "clear_failures",
+      "label": "Clear Remembered Failures",
+      "description": "Forget all remembered failures so every account is tried again.",
+      "button_label": "Clear",
+      "button_variant": "outline",
+      "button_color": "red"
+    }
+  ]
+}
