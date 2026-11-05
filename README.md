@@ -8,6 +8,8 @@ When a VOD stream fails to start on one provider account (for example HTTP 458, 
 
 Copy this repository's files into `/data/plugins/vod_failover` in your Dispatcharr data folder, then enable **VOD Failover** on the Plugins page.
 
+Or download `vod_failover-1.4.0.zip` from Releases and import it on the Plugins page. Use that zip rather than GitHub's source zip, because Dispatcharr names the plugin after the zip's top folder.
+
 ## Use
 
 1. Enable it in the plugin settings. It needs at least two accounts carrying the same titles.
