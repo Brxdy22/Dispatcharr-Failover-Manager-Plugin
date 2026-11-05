@@ -146,7 +146,7 @@ class Plugin:
     name = "VOD Failover"
     version = "1.4.0"
     description = "Retries a VOD on the next provider account when the first one fails to start."
-    author = "brxdy"
+    author = "Brxdy22"
 
     fields = [
         {"id": "enabled", "label": "Enable failover", "type": "boolean", "default": True,

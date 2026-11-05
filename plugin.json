@@ -2,7 +2,7 @@
   "name": "VOD Failover",
   "version": "1.4.0",
   "description": "When a VOD stream fails to start on one provider account (e.g. HTTP 458 connection limit, 404, timeout), retries the same title on the next account that carries it, and remembers the failure so later requests go straight to a working account.",
-  "author": "brxdy",
+  "author": "Brxdy22",
   "license": "MIT",
   "repo_url": "https://github.com/Brxdy22/Dispatcharr-VOD-Failover-Plugin",
   "fields": [
