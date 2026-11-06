@@ -1,6 +1,6 @@
 {
   "name": "VOD Failover",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "When a VOD stream fails to start on one provider account (e.g. HTTP 458 connection limit, 404, timeout), retries the same title on the next account that carries it, and remembers the failure so later requests go straight to a working account.",
   "author": "Brxdy22",
   "license": "MIT",

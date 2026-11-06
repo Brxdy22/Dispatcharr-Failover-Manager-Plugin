@@ -25,6 +25,7 @@ reloads in Dispatcharr cannot leave a dangling reference.
 import logging
 import re
 import sys
+import threading
 import time
 from urllib.parse import urlparse
 from functools import wraps
@@ -39,6 +40,11 @@ DEFAULT_SETTINGS = {"enabled": True, "fail_ttl_minutes": 5, "limit_ttl_seconds":
 _ORIG_ORDER_ATTR = "_vod_failover_orig_order_candidates"
 _ORIG_STREAM_ATTR = "_vod_failover_orig_stream_content_with_session"
 _ORIG_SELECT_ATTR = "_vod_failover_orig_select_vod_stream"
+
+
+HOOKED_VIEWS = ("_order_candidates", "_select_vod_stream", "_content_type_for_obj")
+HOOK_TRIES = 60
+HOOK_RETRY_SECONDS = 1
 
 
 def _views():
@@ -144,7 +150,7 @@ def _is_account_level_error(message):
 
 class Plugin:
     name = "VOD Failover"
-    version = "1.4.0"
+    version = "1.4.1"
     description = "Retries a VOD on the next provider account when the first one fails to start."
     author = "Brxdy22"
 
@@ -183,7 +189,22 @@ class Plugin:
         ACTIVE_PLUGIN = self
         self._cached_settings = {}
         self._settings_cache = (0.0, {})
-        self._install_hooks()
+        self._install_when_ready()
+
+    def _install_when_ready(self, tries=HOOK_TRIES):
+        """Dispatcharr can load plugins while its VOD views are still importing. Hooking then
+        would fail and leave this worker without failover until the next restart, so wait."""
+        if ACTIVE_PLUGIN is not self:
+            return  # replaced by a reload
+        views = _views()
+        if views is None or all(hasattr(views, name) for name in HOOKED_VIEWS):
+            self._install_hooks()
+        elif tries > 0:
+            timer = threading.Timer(HOOK_RETRY_SECONDS, self._install_when_ready, args=(tries - 1,))
+            timer.daemon = True
+            timer.start()
+        else:
+            logger.error("[VOD-Failover] Dispatcharr VOD views never finished loading; hooks not installed.")
 
     # ------------------------------------------------------------------ settings
 
