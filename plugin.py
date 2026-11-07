@@ -35,7 +35,11 @@ logger = logging.getLogger(__name__)
 ACTIVE_PLUGIN = None
 KEY_PREFIX = "vod_failover:bad:"
 DEFAULT_SETTINGS = {"enabled": True, "fail_ttl_minutes": 5, "limit_ttl_seconds": 60, "max_attempts": 4,
-                    "preempt_idle_downloads": True, "streamcache_url": "http://127.0.0.1:8080"}
+                    "preempt_idle_downloads": True, "streamcache_url": "http://127.0.0.1:8080",
+                    "proxy_host": "127.0.0.1", "mirror_urls": ""}
+PLUGIN_KEY = "vod_failover"
+MIRROR_HELP = ("# One [section] per M3U Failover account, then its URLs in order of preference.\n"
+               "# Base URLs only (scheme://host[:port]). Lines starting with # are ignored.\n")
 
 _ORIG_ORDER_ATTR = "_vod_failover_orig_order_candidates"
 _ORIG_STREAM_ATTR = "_vod_failover_orig_stream_content_with_session"
@@ -148,9 +152,199 @@ def _is_account_level_error(message):
     return True  # 458/429/403/5xx/timeouts/connection errors
 
 
+# ---------------------------------------------------------------- M3U Failover mirrors
+
+MIRROR_FIELDS = [
+    {
+        "id": "mirrors",
+        "label": "Mirror URLs (M3U Failover)",
+        "type": "section",
+        "collapsed": False,
+        "description": "Only for accounts that use the M3U Failover proxy. The VOD failover above works without it."
+    },
+    {
+        "id": "proxy_host",
+        "section": "mirrors",
+        "label": "M3U Failover address",
+        "type": "string",
+        "default": "127.0.0.1",
+        "help_text": "Host of the M3U Failover proxy as seen from Dispatcharr. Accounts whose Server URL points at it are listed.",
+        "description": "Host of the M3U Failover proxy as seen from Dispatcharr. Accounts whose Server URL points at it are listed."
+    },
+    {
+        "id": "mirror_urls",
+        "section": "mirrors",
+        "label": "Mirror list",
+        "type": "text",
+        "rows": 12,
+        "default": "",
+        "placeholder": "Press Load Mirror List, then reopen this page.",
+        "help_text": "Edit, press Save, then Apply Mirror List. One [section] per account, then its URLs in order of preference. Sections left out are not changed. The nightly sort may reorder them again.",
+        "description": "Edit, press Save, then Apply Mirror List. One [section] per account, then its URLs in order of preference. Sections left out are not changed. The nightly sort may reorder them again."
+    }
+]
+MIRROR_ACTIONS = [
+    {
+        "id": "mirror_status",
+        "label": "Mirror Status",
+        "description": "Show which mirror URL each proxied account uses, pauses, resting URLs and the last sort.",
+        "button_label": "Show Status",
+        "button_variant": "filled",
+        "button_color": "blue"
+    },
+    {
+        "id": "mirror_load",
+        "label": "Load Mirror List",
+        "description": "Copy the proxy's current URL lists into the Mirror list box. Reopen this page to see them.",
+        "button_label": "Load",
+        "button_variant": "outline",
+        "button_color": "blue"
+    },
+    {
+        "id": "mirror_apply",
+        "label": "Apply Mirror List",
+        "description": "Send the saved Mirror list to the proxy. It writes upstreams.conf and uses the new order at once.",
+        "button_label": "Apply",
+        "button_variant": "filled",
+        "button_color": "orange"
+    },
+    {
+        "id": "mirror_sort",
+        "label": "Sort Mirrors Now",
+        "description": "Run the nightly sort now: a few spaced logins per URL, then fastest and most reliable first.",
+        "button_label": "Sort Now",
+        "button_variant": "outline",
+        "button_color": "blue"
+    }
+]
+
+
+def _proxy_accounts(host):
+    """[(dispatcharr account name, port)] for M3U accounts whose server URL points at the proxy."""
+    from apps.m3u.models import M3UAccount
+    hosts = {host.strip().lower()} | ({"127.0.0.1", "localhost"} if host.strip() in ("127.0.0.1", "localhost") else set())
+    found = []
+    for acct in M3UAccount.objects.order_by("name"):
+        u = urlparse(acct.server_url or "")
+        try:
+            port = u.port
+        except ValueError:
+            continue
+        if (u.hostname or "").lower() in hosts and port:
+            found.append((acct.name, port))
+    return found
+
+
+def _proxy_call(host, port, path, payload=None, timeout=5):
+    import json
+    import urllib.error
+    import urllib.request
+    data = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(f"http://{host}:{port}{path}", data=data, method="POST" if data else "GET",
+                                 headers={"Content-Type": "application/json"} if data else {})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, json.loads(resp.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read() or b"{}")
+        except ValueError:
+            return e.code, {"error": f"HTTP {e.code}"}
+
+
+def _proxy_states(host):
+    """[(dispatcharr name, port, status dict or None, error)] for every proxied account."""
+    out = []
+    for name, port in _proxy_accounts(host):
+        try:
+            code, st = _proxy_call(host, port, "/__status")
+            out.append((name, port, st, None) if code == 200 and isinstance(st, dict) and "account" in st
+                       else (name, port, None, f"HTTP {code}, not an M3U Failover port"))
+        except Exception as e:
+            out.append((name, port, None, f"not reachable ({e.__class__.__name__})"))
+    return out
+
+
+def _parse_mirror_text(text):
+    """'[section]' then URLs -> {section: [urls]}; '#' comments and text after a URL are ignored."""
+    sections, cur = {}, None
+    for lineno, raw in enumerate((text or "").splitlines(), 1):
+        line = raw.split("#", 1)[0].strip()  # a base URL never contains '#'
+        if not line:
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            cur = line[1:-1].strip()
+            if cur in sections:
+                raise ValueError(f"line {lineno}: [{cur}] is listed twice")
+            sections[cur] = []
+        elif line.lower().startswith(("http://", "https://")):
+            if cur is None:
+                raise ValueError(f"line {lineno}: URL before any [section]")
+            sections[cur].append(line.split()[0].rstrip("/"))
+        else:
+            raise ValueError(f"line {lineno}: expected [section] or an http(s) URL, got {line[:60]!r}")
+    return sections
+
+
+def _mirror_text(states):
+    lines = [MIRROR_HELP]
+    for name, port, st, err in states:
+        if st and "urls" in st:
+            lines.append(f"[{st['account']}]   # Dispatcharr account: {name}, port {port}")
+            lines.extend(st.get("urls") or [])
+            lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _when(seconds):
+    seconds = int(seconds)
+    return f"{seconds // 60}m {seconds % 60}s" if seconds >= 60 else f"{seconds}s"
+
+
+def _mirror_report(states):
+    if not states:
+        return ("No M3U account points at the M3U Failover proxy. Set an account's Server URL to "
+                "http://<proxy host>:<port> from upstreams.conf.")
+    parts = []
+    for name, port, st, err in states:
+        if not st:
+            parts.append(f"{name} (port {port}): {err}")
+            continue
+        bits = [f"{name} [{st['account']}]: using {st.get('preferred') or (st.get('upstreams') or ['-'])[0]}",
+                f"{len(st.get('urls') or st.get('upstreams') or [])} URL(s)"]
+        if st.get("paused_seconds"):
+            bits.append(f"PAUSED {_when(st['paused_seconds'])} ({st.get('pause_reason') or 'repeated failures'})")
+        if st.get("stuck_slot_seconds"):
+            bits.append(f"stuck connection slot for {_when(st['stuck_slot_seconds'])}")
+        cooling = [f["target"] for f in st.get("failures") or [] if f.get("cooling_down_seconds")]
+        if cooling:
+            bits.append("resting: " + ", ".join(cooling))
+        if st.get("refused_feeds"):
+            bits.append(f"{len(st['refused_feeds'])} live feed(s) refused")
+        streams = st.get("active_streams") or []
+        bits.append(f"{len(streams)} stream(s) playing")
+        ls = st.get("last_sort")
+        bits.append(f"last sort {ls['at']}: {ls['result']}" if ls else
+                    "not sorted yet" + ("" if st.get("login_known") else " (login not seen yet)"))
+        parts.append("; ".join(bits))
+    return " | ".join(parts)
+
+
+def _save_setting(key, value):
+    """Write one setting without the save hooks; the row lock keeps a save from another worker."""
+    from django.db import transaction
+    from apps.plugins.models import PluginConfig
+    with transaction.atomic():
+        row = PluginConfig.objects.select_for_update().filter(key=key).first()
+        if row is None:
+            return False
+        PluginConfig.objects.filter(pk=row.pk).update(settings={**(row.settings or {}), "mirror_urls": value})
+    return True
+
+
 class Plugin:
     name = "VOD Failover"
-    version = "1.4.1"
+    version = "1.5"
     description = "Retries a VOD on the next provider account when the first one fails to start."
     author = "Brxdy22"
 
@@ -173,7 +367,7 @@ class Plugin:
         {"id": "max_attempts", "label": "Max attempts per request", "type": "number", "default": 4,
          "help_text": "Total upstream attempts (including the first) per request.",
          "description": "Total upstream attempts (including the first) per request."},
-    ]
+    ] + MIRROR_FIELDS
 
     actions = [
         {"id": "status_check", "label": "Check Hook Status",
@@ -182,7 +376,7 @@ class Plugin:
         {"id": "clear_failures", "label": "Clear Remembered Failures",
          "description": "Forget all remembered failures so every account is tried again.",
          "button_label": "Clear", "button_variant": "outline", "button_color": "red"},
-    ]
+    ] + MIRROR_ACTIONS
 
     def __init__(self):
         global ACTIVE_PLUGIN
@@ -591,4 +785,91 @@ class Plugin:
                     removed += r.delete(k)
             return {"status": "ok", "message": f"Cleared {removed} remembered failure(s)."}
 
+        if action in ("mirror_status", "mirror_load", "mirror_apply", "mirror_sort"):
+            try:
+                return self._mirror_action(action)
+            except Exception as e:
+                logger.error("[VOD-Failover] %s failed: %s", action, e, exc_info=True)
+                return {"status": "error", "message": f"{action} failed: {e}"}
+
         return {"status": "error", "message": f"Unknown action: {action}"}
+
+    def _fresh_settings(self):
+        """Saved settings straight from the database (the 30s cache could be older than a Save)."""
+        self._settings_cache = (0.0, {})
+        return self._settings()
+
+    def _mirror_action(self, action):
+        s = self._fresh_settings()
+        host = str(s.get("proxy_host") or "127.0.0.1").strip()
+        states = _proxy_states(host)
+        live = [x for x in states if x[2]]
+
+        if action == "mirror_status":
+            return {"status": "ok", "message": _mirror_report(states)}
+
+        if not live:
+            return {"status": "error", "message": _mirror_report(states)}
+
+        if action == "mirror_sort":
+            name, port = live[0][0], live[0][1]
+            code, body = _proxy_call(host, port, "/__sort")
+            if code == 202:
+                return {"status": "ok", "message": "Sort started. It takes a few minutes; press Mirror Status "
+                                                   "afterwards. Accounts whose login the proxy hasn't seen yet are skipped."}
+            if code == 409:
+                return {"status": "ok", "message": "A sort is already running."}
+            return {"status": "error", "message": f"Sort not started: {body.get('error') or f'HTTP {code}'}"}
+
+        if action == "mirror_load":
+            if not any("urls" in st for _, _, st, _ in live):
+                return {"status": "error", "message": "The M3U Failover proxy is older than 1.3 and doesn't "
+                                                      "share its full URLs; update it first."}
+            row = self._config_row()
+            if row is None or not _save_setting(row.key, _mirror_text(live)):
+                return {"status": "error", "message": "Plugin settings not found."}
+            return {"status": "ok", "message": f"Loaded the URL lists of {len(live)} account(s). Reopen or refresh "
+                                               "this page to see them in Mirror list."}
+
+        # mirror_apply
+        text = s.get("mirror_urls") or ""
+        try:
+            wanted = _parse_mirror_text(text)
+        except ValueError as e:
+            return {"status": "error", "message": f"Mirror list not applied: {e}"}
+        if not wanted:
+            return {"status": "error", "message": "Mirror list is empty. Press Load Mirror List first, "
+                                                  "edit it, press Save, then Apply."}
+        by_section = {st["account"]: (name, port, st) for name, port, st, err in live}
+        unknown = [sec for sec in wanted if sec not in by_section]
+        if unknown:
+            return {"status": "error", "message": "Mirror list not applied: no proxied account named "
+                                                  + ", ".join(f"[{u}]" for u in unknown)
+                                                  + f". Known: {', '.join(f'[{k}]' for k in by_section)}."}
+        empty = [sec for sec, urls in wanted.items() if not urls]
+        if empty:
+            return {"status": "error", "message": "Mirror list not applied: every account needs at least one URL ("
+                                                  + ", ".join(f"[{e}]" for e in empty) + " has none)."}
+        done, same, failed = [], [], []
+        for sec, urls in wanted.items():
+            name, port, st = by_section[sec]
+            if "urls" not in st:  # before 1.3 the proxy would forward /__urls to the provider
+                failed.append(f"{name}: this M3U Failover version can't edit URLs; update it to 1.3 or later")
+                continue
+            if urls == st["urls"]:
+                same.append(name)
+                continue
+            code, body = _proxy_call(host, port, "/__urls", {"urls": urls})
+            if code == 200:
+                done.append(f"{name} ({len(urls)} URL(s))")
+                logger.info("[VOD-Failover] mirror list for %s set to %d URL(s)", name, len(urls))
+            else:
+                failed.append(f"{name}: {body.get('error') or f'HTTP {code}'}")
+        msg = []
+        if done:
+            msg.append("Applied: " + ", ".join(done) + ".")
+        if same:
+            msg.append("Unchanged: " + ", ".join(same) + ".")
+        if failed:
+            msg.append("Not applied: " + "; ".join(failed) + ".")
+        return {"status": "error" if failed and not done else "ok", "message": " ".join(msg)}

@@ -1,7 +1,7 @@
 {
   "name": "VOD Failover",
-  "version": "1.4.1",
-  "description": "When a VOD stream fails to start on one provider account (e.g. HTTP 458 connection limit, 404, timeout), retries the same title on the next account that carries it, and remembers the failure so later requests go straight to a working account.",
+  "version": "1.5",
+  "description": "When a VOD stream fails to start on one provider account (e.g. HTTP 458 connection limit, 404, timeout), retries the same title on the next account that carries it, and remembers the failure so later requests go straight to a working account. Also shows and edits the M3U Failover proxy's mirror URLs.",
   "author": "Brxdy22",
   "license": "MIT",
   "repo_url": "https://github.com/Brxdy22/Dispatcharr-VOD-Failover-Plugin",
@@ -53,6 +53,33 @@
       "default": 4,
       "help_text": "Total upstream attempts (including the first) before giving up on a request.",
       "description": "Total upstream attempts (including the first) before giving up on a request."
+    },
+    {
+      "id": "mirrors",
+      "label": "Mirror URLs (M3U Failover)",
+      "type": "section",
+      "collapsed": false,
+      "description": "Only for accounts that use the M3U Failover proxy. The VOD failover above works without it."
+    },
+    {
+      "id": "proxy_host",
+      "section": "mirrors",
+      "label": "M3U Failover address",
+      "type": "string",
+      "default": "127.0.0.1",
+      "help_text": "Host of the M3U Failover proxy as seen from Dispatcharr. Accounts whose Server URL points at it are listed.",
+      "description": "Host of the M3U Failover proxy as seen from Dispatcharr. Accounts whose Server URL points at it are listed."
+    },
+    {
+      "id": "mirror_urls",
+      "section": "mirrors",
+      "label": "Mirror list",
+      "type": "text",
+      "rows": 12,
+      "default": "",
+      "placeholder": "Press Load Mirror List, then reopen this page.",
+      "help_text": "Edit, press Save, then Apply Mirror List. One [section] per account, then its URLs in order of preference. Sections left out are not changed. The nightly sort may reorder them again.",
+      "description": "Edit, press Save, then Apply Mirror List. One [section] per account, then its URLs in order of preference. Sections left out are not changed. The nightly sort may reorder them again."
     }
   ],
   "actions": [
@@ -71,6 +98,38 @@
       "button_label": "Clear",
       "button_variant": "outline",
       "button_color": "red"
+    },
+    {
+      "id": "mirror_status",
+      "label": "Mirror Status",
+      "description": "Show which mirror URL each proxied account uses, pauses, resting URLs and the last sort.",
+      "button_label": "Show Status",
+      "button_variant": "filled",
+      "button_color": "blue"
+    },
+    {
+      "id": "mirror_load",
+      "label": "Load Mirror List",
+      "description": "Copy the proxy's current URL lists into the Mirror list box. Reopen this page to see them.",
+      "button_label": "Load",
+      "button_variant": "outline",
+      "button_color": "blue"
+    },
+    {
+      "id": "mirror_apply",
+      "label": "Apply Mirror List",
+      "description": "Send the saved Mirror list to the proxy. It writes upstreams.conf and uses the new order at once.",
+      "button_label": "Apply",
+      "button_variant": "filled",
+      "button_color": "orange"
+    },
+    {
+      "id": "mirror_sort",
+      "label": "Sort Mirrors Now",
+      "description": "Run the nightly sort now: a few spaced logins per URL, then fastest and most reliable first.",
+      "button_label": "Sort Now",
+      "button_variant": "outline",
+      "button_color": "blue"
     }
   ]
 }
