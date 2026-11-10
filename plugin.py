@@ -361,7 +361,7 @@ def _save_setting(key, value):
 class Plugin:
     name = "Failover Manager"
     version = "1.6"
-    description = "Retries a VOD on the next provider account when the first one fails to start."
+    description = "When a VOD stream fails to start on one provider account (e.g. HTTP 458 connection limit, 404, timeout), retries the same title on the next account that carries it, and remembers the failure so later requests go straight to a working account. Also shows and edits the M3U Failover proxy's mirror URLs."
     author = "Brxdy22"
 
     fields = [
