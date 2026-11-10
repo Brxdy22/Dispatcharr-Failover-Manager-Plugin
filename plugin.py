@@ -1,5 +1,5 @@
 """
-VOD Failover for Dispatcharr.
+Failover Manager for Dispatcharr (formerly VOD Failover).
 
 Stock Dispatcharr only fails over between provider accounts while *choosing* one
 (an account with no free slot is skipped). Once an account is chosen, an upstream
@@ -33,17 +33,33 @@ from functools import wraps
 logger = logging.getLogger(__name__)
 
 ACTIVE_PLUGIN = None
-KEY_PREFIX = "vod_failover:bad:"
+KEY_PREFIX = "failover_manager:bad:"
 DEFAULT_SETTINGS = {"enabled": True, "fail_ttl_minutes": 5, "limit_ttl_seconds": 60, "max_attempts": 4,
                     "preempt_idle_downloads": True, "streamcache_url": "http://127.0.0.1:8080",
                     "proxy_host": "127.0.0.1", "mirror_urls": ""}
-PLUGIN_KEY = "vod_failover"
+PLUGIN_KEY = "failover_manager"
 MIRROR_HELP = ("# One [section] per M3U Failover account, then its URLs in order of preference.\n"
                "# Base URLs only (scheme://host[:port]). Lines starting with # are ignored.\n")
 
-_ORIG_ORDER_ATTR = "_vod_failover_orig_order_candidates"
-_ORIG_STREAM_ATTR = "_vod_failover_orig_stream_content_with_session"
-_ORIG_SELECT_ATTR = "_vod_failover_orig_select_vod_stream"
+_ORIG_ORDER_ATTR = "_failover_manager_orig_order_candidates"
+_ORIG_STREAM_ATTR = "_failover_manager_orig_stream_content_with_session"
+_ORIG_SELECT_ATTR = "_failover_manager_orig_select_vod_stream"
+# Where the plugin kept the originals before it was renamed from VOD Failover. A worker
+# that still holds the old hooks has the true originals there; adopting them keeps the
+# old and new hooks from stacking.
+_LEGACY_ORIG_ATTRS = {
+    _ORIG_ORDER_ATTR: "_vod_failover_orig_order_candidates",
+    _ORIG_STREAM_ATTR: "_vod_failover_orig_stream_content_with_session",
+    _ORIG_SELECT_ATTR: "_vod_failover_orig_select_vod_stream",
+}
+
+
+def _keep_original(obj, attr, current):
+    """Store the unpatched function once; never replace it with a patched one or None."""
+    if not callable(getattr(obj, attr, None)):
+        legacy = getattr(obj, _LEGACY_ORIG_ATTRS[attr], None)
+        setattr(obj, attr, legacy if callable(legacy) else current)
+    return getattr(obj, attr)
 
 
 HOOKED_VIEWS = ("_order_candidates", "_select_vod_stream", "_content_type_for_obj")
@@ -110,7 +126,7 @@ def _purge_failed_session(manager, session_id):
         RedisBackedVODConnection(session_id, manager.redis_client).cleanup(
             current_worker_id=getattr(manager, "worker_id", None))
     except Exception as e:
-        logger.debug("[VOD-Failover] session purge failed for %s: %s", session_id, e)
+        logger.debug("[Failover-Manager] session purge failed for %s: %s", session_id, e)
 
 
 _FAILED_URL_RE = re.compile(r"for url: (\S+)")
@@ -343,8 +359,8 @@ def _save_setting(key, value):
 
 
 class Plugin:
-    name = "VOD Failover"
-    version = "1.5"
+    name = "Failover Manager"
+    version = "1.6"
     description = "Retries a VOD on the next provider account when the first one fails to start."
     author = "Brxdy22"
 
@@ -398,7 +414,7 @@ class Plugin:
             timer.daemon = True
             timer.start()
         else:
-            logger.error("[VOD-Failover] Dispatcharr VOD views never finished loading; hooks not installed.")
+            logger.error("[Failover-Manager] Dispatcharr VOD views never finished loading; hooks not installed.")
 
     # ------------------------------------------------------------------ settings
 
@@ -414,8 +430,9 @@ class Plugin:
                 row = PluginConfig.objects.filter(key=__name__.split(".", 1)[1]).first()
                 if row is not None:
                     return row
-            return (PluginConfig.objects.filter(key__iexact="vod_failover").first()
-                    or PluginConfig.objects.filter(name__iexact="VOD Failover").first())
+            return (PluginConfig.objects.filter(key__iexact="failover_manager").first()
+                    or PluginConfig.objects.filter(name__iexact="Failover Manager").first()
+                    or PluginConfig.objects.filter(key__iexact="vod_failover").first())
         except Exception:
             return None
 
@@ -463,21 +480,12 @@ class Plugin:
         views = _views()
         mgr = _manager_cls()
         if views is None or mgr is None:
-            logger.warning("[VOD-Failover] Dispatcharr VOD modules not importable; hooks not installed.")
+            logger.warning("[Failover-Manager] Dispatcharr VOD modules not importable; hooks not installed.")
             return
 
-        # Store originals exactly once; never replace them with a patched function or None.
-        if not callable(getattr(views, _ORIG_ORDER_ATTR, None)):
-            setattr(views, _ORIG_ORDER_ATTR, views._order_candidates)
-        if not callable(getattr(mgr, _ORIG_STREAM_ATTR, None)):
-            setattr(mgr, _ORIG_STREAM_ATTR, mgr.stream_content_with_session)
-
-        if not callable(getattr(views, _ORIG_SELECT_ATTR, None)):
-            setattr(views, _ORIG_SELECT_ATTR, views._select_vod_stream)
-
-        orig_order = getattr(views, _ORIG_ORDER_ATTR)
-        orig_stream = getattr(mgr, _ORIG_STREAM_ATTR)
-        orig_select = getattr(views, _ORIG_SELECT_ATTR)
+        orig_order = _keep_original(views, _ORIG_ORDER_ATTR, views._order_candidates)
+        orig_stream = _keep_original(mgr, _ORIG_STREAM_ATTR, mgr.stream_content_with_session)
+        orig_select = _keep_original(views, _ORIG_SELECT_ATTR, views._select_vod_stream)
 
         @wraps(orig_select)
         def select_vod_stream(*args, **kwargs):
@@ -488,7 +496,7 @@ class Plugin:
             try:
                 return plugin._select_after_preempt(orig_select, args, kwargs)
             except Exception as e:
-                logger.warning("[VOD-Failover] preempt error (ignored): %s", e)
+                logger.warning("[Failover-Manager] preempt error (ignored): %s", e)
                 return None
 
         @wraps(orig_order)
@@ -507,11 +515,11 @@ class Plugin:
                 bad = {k for k, v in zip(flat, hits) if v}
                 keep = [rel for rel, ks in zip(ordered, keys_per) if not any(k in bad for k in ks)]
                 if keep and len(keep) != len(ordered):
-                    logger.info("[VOD-Failover] Skipping %d remembered-bad stream(s); %d candidate(s) left",
+                    logger.info("[Failover-Manager] Skipping %d remembered-bad stream(s); %d candidate(s) left",
                                 len(ordered) - len(keep), len(keep))
                 return keep or ordered
             except Exception as e:
-                logger.warning("[VOD-Failover] candidate filter error (ignored): %s", e)
+                logger.warning("[Failover-Manager] candidate filter error (ignored): %s", e)
                 return ordered
 
         @wraps(orig_stream)
@@ -527,16 +535,16 @@ class Plugin:
                 return plugin._failover(orig_stream, self, response, session_id, content_obj,
                                         stream_url, m3u_profile, args, kwargs)
             except Exception as e:
-                logger.error("[VOD-Failover] failover error, returning original failure: %s", e, exc_info=True)
+                logger.error("[Failover-Manager] failover error, returning original failure: %s", e, exc_info=True)
                 return response
 
-        order_candidates._vod_failover = True
-        stream_content_with_session._vod_failover = True
-        select_vod_stream._vod_failover = True
+        order_candidates._failover_manager = True
+        stream_content_with_session._failover_manager = True
+        select_vod_stream._failover_manager = True
         views._select_vod_stream = select_vod_stream
         views._order_candidates = order_candidates
         mgr.stream_content_with_session = stream_content_with_session
-        logger.info("[VOD-Failover] Hooks installed (candidate filter + setup-failure retry + idle-download preempt).")
+        logger.info("[Failover-Manager] Hooks installed (candidate filter + setup-failure retry + idle-download preempt).")
 
     def _failover(self, orig_stream, manager, response, session_id, content_obj, stream_url, m3u_profile, args, kwargs):
         views = _views()
@@ -552,7 +560,7 @@ class Plugin:
             self._remember_failure(views, content_type, content_uuid, stream_url, m3u_profile, message)
 
             if attempts >= self._max_attempts():
-                logger.warning("[VOD-Failover] %s: giving up after %d attempt(s)", name, attempts)
+                logger.warning("[Failover-Manager] %s: giving up after %d attempt(s)", name, attempts)
                 return response
 
             selected = views._select_vod_stream(content_type, content_uuid)
@@ -564,14 +572,14 @@ class Plugin:
                 if self._load_missing_episode_lists(content_obj, content_type):
                     selected = views._select_vod_stream(content_type, content_uuid)
             if not selected or selected["final_stream_url"] in tried:
-                logger.warning("[VOD-Failover] %s: no other account available after %d attempt(s)", name, attempts)
+                logger.warning("[Failover-Manager] %s: no other account available after %d attempt(s)", name, attempts)
                 return response
 
             stream_url = selected["final_stream_url"]
             m3u_profile = selected["m3u_profile"]
             tried.add(stream_url)
             attempts += 1
-            logger.info("[VOD-Failover] %s: retrying on account %s (attempt %d)",
+            logger.info("[Failover-Manager] %s: retrying on account %s (attempt %d)",
                         name, selected["m3u_account"].name, attempts)
 
             try:
@@ -582,7 +590,7 @@ class Plugin:
 
             response = orig_stream(manager, session_id, content_obj, stream_url, m3u_profile, *args, **kwargs)
             if not _is_setup_failure(response):
-                logger.info("[VOD-Failover] %s: playing from account %s", name, selected["m3u_account"].name)
+                logger.info("[Failover-Manager] %s: playing from account %s", name, selected["m3u_account"].name)
                 return response
             _purge_failed_session(manager, session_id)
 
@@ -607,10 +615,10 @@ class Plugin:
             time.sleep(0.5)
             selected = orig_select(*args, **kwargs)
             if selected is not None:
-                logger.info("[VOD-Failover] Freed %s by cancelling %d unwatched Streamcache download(s)",
+                logger.info("[Failover-Manager] Freed %s by cancelling %d unwatched Streamcache download(s)",
                             selected["m3u_account"].name, cancelled)
                 return selected
-        logger.warning("[VOD-Failover] Cancelled %d unwatched download(s) but no slot was released in time", cancelled)
+        logger.warning("[Failover-Manager] Cancelled %d unwatched download(s) but no slot was released in time", cancelled)
         return None
 
     @staticmethod
@@ -623,7 +631,7 @@ class Plugin:
             with urllib.request.urlopen(f"{base}/debug/state", timeout=3) as resp:
                 state = json.load(resp)
         except Exception as e:
-            logger.debug("[VOD-Failover] Streamcache not reachable at %s: %s", base, e)
+            logger.debug("[Failover-Manager] Streamcache not reachable at %s: %s", base, e)
             return 0
         cancelled = 0
         for f in state.get("active_downloads") or []:
@@ -636,10 +644,10 @@ class Plugin:
                                              data=b"", method="POST")
                 urllib.request.urlopen(req, timeout=3).close()
                 cancelled += 1
-                logger.info("[VOD-Failover] Cancelled unwatched Streamcache download %s (%s)",
+                logger.info("[Failover-Manager] Cancelled unwatched Streamcache download %s (%s)",
                             key, (f.get("url") or "").split("/proxy/vod/")[-1])
             except Exception as e:
-                logger.warning("[VOD-Failover] could not cancel %s: %s", key, e)
+                logger.warning("[Failover-Manager] could not cancel %s: %s", key, e)
         return cancelled
 
     def _load_missing_episode_lists(self, content_obj, content_type):
@@ -652,7 +660,7 @@ class Plugin:
             from apps.vod.models import M3USeriesRelation, M3UEpisodeRelation
             from apps.vod.tasks import refresh_series_episodes
         except Exception as e:
-            logger.warning("[VOD-Failover] cannot load episode lists: %s", e)
+            logger.warning("[Failover-Manager] cannot load episode lists: %s", e)
             return False
 
         series = getattr(content_obj, "series", None)
@@ -677,11 +685,11 @@ class Plugin:
                 started = time.time()
                 refresh_series_episodes(rel.m3u_account, series, rel.external_series_id)
                 loaded = True
-                logger.info("[VOD-Failover] %s: loaded %s episode list from %s (%.1fs)",
+                logger.info("[Failover-Manager] %s: loaded %s episode list from %s (%.1fs)",
                             getattr(series, "name", "?"), rel.external_series_id, rel.m3u_account.name,
                             time.time() - started)
             except Exception as e:
-                logger.warning("[VOD-Failover] loading episodes from %s failed: %s", rel.m3u_account.name, e)
+                logger.warning("[Failover-Manager] loading episodes from %s failed: %s", rel.m3u_account.name, e)
         return loaded
 
     def _remember_failure(self, views, content_type, content_uuid, stream_url, m3u_profile, message):
@@ -712,7 +720,7 @@ class Plugin:
                         m3u_profile = None
                         break
         except Exception as e:
-            logger.debug("[VOD-Failover] relation lookup failed: %s", e)
+            logger.debug("[Failover-Manager] relation lookup failed: %s", e)
 
         account_level = _is_account_level_error(message)
         account_name = (relation.m3u_account.name if relation is not None
@@ -735,7 +743,7 @@ class Plugin:
             key = f"{KEY_PREFIX}acct:{m3u_profile.m3u_account_id}:{prefix}{pk}"
 
         r.setex(key, ttl, message[:200] or "failed")
-        logger.info("[VOD-Failover] Marked %s on account %s as bad for %ds (%s): %s",
+        logger.info("[Failover-Manager] Marked %s on account %s as bad for %ds (%s): %s",
                     "account" if ":acct:" in key else "stream", account_name, ttl,
                     content_type, message[:120])
 
@@ -753,7 +761,7 @@ class Plugin:
             mgr.stream_content_with_session = getattr(mgr, _ORIG_STREAM_ATTR)
         if ACTIVE_PLUGIN is self:
             ACTIVE_PLUGIN = None
-        logger.info("[VOD-Failover] Hooks removed (context=%s).", context)
+        logger.info("[Failover-Manager] Hooks removed (context=%s).", context)
 
     def run(self, action, params=None, context=None):
         if context and isinstance(context.get("settings"), dict):
@@ -763,8 +771,8 @@ class Plugin:
         if action == "status_check":
             views = _views()
             mgr = _manager_cls()
-            hooked = bool(views and getattr(views._order_candidates, "_vod_failover", False)
-                          and mgr and getattr(mgr.stream_content_with_session, "_vod_failover", False))
+            hooked = bool(views and getattr(views._order_candidates, "_failover_manager", False)
+                          and mgr and getattr(mgr.stream_content_with_session, "_failover_manager", False))
             count = 0
             r = _redis()
             if r is not None:
@@ -789,7 +797,7 @@ class Plugin:
             try:
                 return self._mirror_action(action)
             except Exception as e:
-                logger.error("[VOD-Failover] %s failed: %s", action, e, exc_info=True)
+                logger.error("[Failover-Manager] %s failed: %s", action, e, exc_info=True)
                 return {"status": "error", "message": f"{action} failed: {e}"}
 
         return {"status": "error", "message": f"Unknown action: {action}"}
@@ -862,7 +870,7 @@ class Plugin:
             code, body = _proxy_call(host, port, "/__urls", {"urls": urls})
             if code == 200:
                 done.append(f"{name} ({len(urls)} URL(s))")
-                logger.info("[VOD-Failover] mirror list for %s set to %d URL(s)", name, len(urls))
+                logger.info("[Failover-Manager] mirror list for %s set to %d URL(s)", name, len(urls))
             else:
                 failed.append(f"{name}: {body.get('error') or f'HTTP {code}'}")
         msg = []

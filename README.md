@@ -1,8 +1,8 @@
 <img src="logo.png" alt="" width="96">
 
-# VOD Failover
+# Failover Manager
 
-A plugin for [Dispatcharr](https://github.com/Dispatcharr/Dispatcharr).
+A plugin for [Dispatcharr](https://github.com/Dispatcharr/Dispatcharr). Formerly called VOD Failover.
 
 When a VOD stream fails to start on one provider account (for example HTTP 458, 404 or a timeout), this retries the same title on the next account that carries it. It remembers the failure, so later requests go straight to a working account.
 
@@ -14,9 +14,17 @@ See [Dispatcharr Failover Stack](https://github.com/Brxdy22/Dispatcharr-Failover
 
 ## Install
 
-Copy this repository's files into `/data/plugins/vod_failover` in your Dispatcharr data folder, then enable **VOD Failover** on the Plugins page.
+Copy this repository's files into `/data/plugins/failover_manager` in your Dispatcharr data folder, then enable **Failover Manager** on the Plugins page.
 
-Or download `vod_failover-1.5.zip` from Releases and import it on the Plugins page. Use that zip rather than GitHub's source zip, because Dispatcharr names the plugin after the zip's top folder.
+Or download `failover_manager-1.6.zip` from Releases and import it on the Plugins page. Use that zip rather than GitHub's source zip, because Dispatcharr names the plugin after the zip's top folder.
+
+## Upgrading from VOD Failover
+
+1.6 renamed the plugin, so Dispatcharr sees it as a new plugin with its own settings.
+
+1. Note your settings in **VOD Failover**, then remove it on the Plugins page (or delete `/data/plugins/vod_failover`).
+2. Install **Failover Manager** as above, enable it and enter your settings again. Use **Load Mirror List** to fill the Mirror list box again.
+3. Gluetun AutoSwitch 1.8.4.2 or later reads the new log lines. Older versions only read the old ones, so update it too.
 
 ## Use
 
@@ -47,7 +55,7 @@ If you run [M3U Failover](https://github.com/Brxdy22/Dispatcharr-M3U-Failover) 1
 
 ## Release notes
 
-See [Releases](https://github.com/Brxdy22/Dispatcharr-VOD-Failover-Plugin/releases/latest).
+See [Releases](https://github.com/Brxdy22/Dispatcharr-Failover-Manager-Plugin/releases/latest).
 
 ## Licence
 
