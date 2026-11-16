@@ -16,7 +16,7 @@ See [Dispatcharr Failover Stack](https://github.com/Brxdy22/Dispatcharr-Failover
 
 Copy this repository's files into `/data/plugins/failover_manager` in your Dispatcharr data folder, then enable **Failover Manager** on the Plugins page.
 
-Or download `failover_manager-1.6.zip` from Releases and import it on the Plugins page. Use that zip rather than GitHub's source zip, because Dispatcharr names the plugin after the zip's top folder.
+Or download `failover_manager-1.6.0.1.zip` from Releases and import it on the Plugins page. Use that zip rather than GitHub's source zip, because Dispatcharr names the plugin after the zip's top folder.
 
 ## Upgrading from VOD Failover
 
@@ -31,6 +31,8 @@ Or download `failover_manager-1.6.zip` from Releases and import it on the Plugin
 1. Enable it in the plugin settings. It needs at least two accounts carrying the same titles.
 2. **Check Hook Status** confirms it is active.
 3. **Clear Remembered Failures** resets what it has learned.
+
+When a client asks for a specific account (`?m3u_account_id=` on the VOD URL), that choice is kept. The account is never skipped, a connection-limit error (458, 460, 429) is retried on the same account for about 5 seconds, and the request never moves to another account. If the account is still busy, the client gets the error.
 
 ## Mirror URLs
 

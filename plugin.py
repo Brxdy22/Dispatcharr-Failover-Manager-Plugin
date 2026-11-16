@@ -19,6 +19,10 @@ This plugin adds two hooks:
    later requests (new sessions, Streamcache probes, other workers) go straight to
    a working account. If every candidate is marked bad, nothing is filtered.
 
+When the client picks an account itself (?m3u_account_id=), that pick is kept: its stream is
+never filtered out, a connection-limit error on it is retried on the same account for ~5s
+without marking it bad, and the request never moves to another account.
+
 Originals are stored once on the patched objects and never overwritten, so plugin
 reloads in Dispatcharr cannot leave a dangling reference.
 """
@@ -65,6 +69,30 @@ def _keep_original(obj, attr, current):
 HOOKED_VIEWS = ("_order_candidates", "_select_vod_stream", "_content_type_for_obj")
 HOOK_TRIES = 60
 HOOK_RETRY_SECONDS = 1
+# Waits before each retry of an account the client picked itself (?m3u_account_id=) that answered
+# with a connection-limit error: about 5s for the provider to release the slot.
+PICKED_RETRY_DELAYS = (1.5, 1.5, 2.0)
+
+# Per-thread: the m3u_account_id the client asked for in the _select_vod_stream call running now.
+_REQUEST_STATE = threading.local()
+
+
+def _as_account_id(value):
+    try:
+        return int(value) if value not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _explicit_account_id(args, kwargs):
+    """The account the client picked with ?m3u_account_id= on this stream request, or None."""
+    request = kwargs.get("request")
+    if request is None and len(args) >= 3:
+        request = args[2]  # client_ip, client_user_agent, request
+    try:
+        return _as_account_id(request.GET.get("m3u_account_id"))
+    except Exception:
+        return None
 
 
 def _views():
@@ -360,7 +388,7 @@ def _save_setting(key, value):
 
 class Plugin:
     name = "Failover Manager"
-    version = "1.6"
+    version = "1.6.0.1"
     description = "When a VOD stream fails to start on one provider account (e.g. HTTP 458 connection limit, 404, timeout), retries the same title on the next account that carries it, and remembers the failure so later requests go straight to a working account. Also shows and edits the M3U Failover proxy's mirror URLs."
     author = "Brxdy22"
 
@@ -489,15 +517,22 @@ class Plugin:
 
         @wraps(orig_select)
         def select_vod_stream(*args, **kwargs):
-            selected = orig_select(*args, **kwargs)
-            plugin = ACTIVE_PLUGIN
-            if selected is not None or plugin is None or not plugin._active():
-                return selected
+            # Let order_candidates (called inside) see which account the client picked.
+            picked = _as_account_id(args[2] if len(args) > 2 else kwargs.get("preferred_m3u_account_id"))
+            previous = getattr(_REQUEST_STATE, "picked_account", None)
+            _REQUEST_STATE.picked_account = picked
             try:
-                return plugin._select_after_preempt(orig_select, args, kwargs)
-            except Exception as e:
-                logger.warning("[Failover-Manager] preempt error (ignored): %s", e)
-                return None
+                selected = orig_select(*args, **kwargs)
+                plugin = ACTIVE_PLUGIN
+                if selected is not None or plugin is None or not plugin._active():
+                    return selected
+                try:
+                    return plugin._select_after_preempt(orig_select, args, kwargs)
+                except Exception as e:
+                    logger.warning("[Failover-Manager] preempt error (ignored): %s", e)
+                    return None
+            finally:
+                _REQUEST_STATE.picked_account = previous
 
         @wraps(orig_order)
         def order_candidates(candidates, preferred_relation=None):
@@ -509,11 +544,16 @@ class Plugin:
                 r = _redis()
                 if r is None:
                     return ordered
+                # A stream on the account the client picked itself is never filtered out.
+                picked = getattr(_REQUEST_STATE, "picked_account", None)
+                pinned_id = (preferred_relation.id if preferred_relation is not None and picked is not None
+                             and preferred_relation.m3u_account_id == picked else None)
                 keys_per = [_relation_keys(rel) for rel in ordered]
                 flat = [k for ks in keys_per for k in ks]
                 hits = r.mget(flat) if flat else []
                 bad = {k for k, v in zip(flat, hits) if v}
-                keep = [rel for rel, ks in zip(ordered, keys_per) if not any(k in bad for k in ks)]
+                keep = [rel for rel, ks in zip(ordered, keys_per)
+                        if rel.id == pinned_id or not any(k in bad for k in ks)]
                 if keep and len(keep) != len(ordered):
                     logger.info("[Failover-Manager] Skipping %d remembered-bad stream(s); %d candidate(s) left",
                                 len(ordered) - len(keep), len(keep))
@@ -554,23 +594,30 @@ class Plugin:
         tried = {stream_url}
         attempts = 1
         loaded_missing = False
+        picked = _explicit_account_id(args, kwargs)
+        # Client picked an account: offer it first again (it is only reached here when another
+        # account was tried first, e.g. Dispatcharr counted the picked one as full).
+        select_args = (content_type, content_uuid) + ((picked,) if picked is not None else ())
 
         while True:
             message = (getattr(response, "content", b"") or b"").decode("utf-8", "replace")
+            if picked is not None and getattr(m3u_profile, "m3u_account_id", None) == picked:
+                return self._retry_picked(views, orig_stream, manager, response, session_id, content_obj,
+                                          stream_url, m3u_profile, args, kwargs, message, picked)
             self._remember_failure(views, content_type, content_uuid, stream_url, m3u_profile, message)
 
             if attempts >= self._max_attempts():
                 logger.warning("[Failover-Manager] %s: giving up after %d attempt(s)", name, attempts)
                 return response
 
-            selected = views._select_vod_stream(content_type, content_uuid)
+            selected = views._select_vod_stream(*select_args)
             if (not selected or selected["final_stream_url"] in tried) and not loaded_missing:
                 # Dispatcharr loads a series' episode list from ONE account on demand, so another
                 # account may carry this episode without Dispatcharr knowing yet. Load those lists
                 # now (provider API calls only, no stream slots) and look again.
                 loaded_missing = True
                 if self._load_missing_episode_lists(content_obj, content_type):
-                    selected = views._select_vod_stream(content_type, content_uuid)
+                    selected = views._select_vod_stream(*select_args)
             if not selected or selected["final_stream_url"] in tried:
                 logger.warning("[Failover-Manager] %s: no other account available after %d attempt(s)", name, attempts)
                 return response
@@ -593,6 +640,46 @@ class Plugin:
                 logger.info("[Failover-Manager] %s: playing from account %s", name, selected["m3u_account"].name)
                 return response
             _purge_failed_session(manager, session_id)
+
+    def _retry_picked(self, views, orig_stream, manager, response, session_id, content_obj,
+                      stream_url, m3u_profile, args, kwargs, message, picked):
+        """The account the client picked itself failed. Never switch to another account.
+        Connection-limit errors (458/460/429) usually mean the provider has not released a
+        just-closed connection yet: wait and retry the same account, and do not mark it bad.
+        Other errors are remembered (for requests without a pick) and returned."""
+        content_type = views._content_type_for_obj(content_obj)
+        content_uuid = str(content_obj.uuid)
+        name = getattr(content_obj, "name", content_uuid)
+        account = getattr(getattr(m3u_profile, "m3u_account", None), "name", picked)
+        for n, delay in enumerate(PICKED_RETRY_DELAYS, 1):
+            if not _is_connection_limit_error(message):
+                self._remember_failure(views, content_type, content_uuid, stream_url, m3u_profile, message)
+                logger.warning("[Failover-Manager] %s: picked account %s failed, not switching: %s",
+                               name, account, message[:120])
+                return response
+            logger.info("[Failover-Manager] %s: picked account %s busy, retry %d/%d in %.1fs",
+                        name, account, n, len(PICKED_RETRY_DELAYS), delay)
+            time.sleep(delay)
+            try:
+                from django.db import close_old_connections
+                close_old_connections()
+            except Exception:
+                pass
+            selected = views._select_vod_stream(content_type, content_uuid, picked)
+            if not selected or getattr(selected["m3u_account"], "id", None) != picked:
+                continue  # Dispatcharr still counts the picked account as full
+            stream_url, m3u_profile = selected["final_stream_url"], selected["m3u_profile"]
+            response = orig_stream(manager, session_id, content_obj, stream_url, m3u_profile, *args, **kwargs)
+            if not _is_setup_failure(response):
+                logger.info("[Failover-Manager] %s: playing from picked account %s", name, account)
+                return response
+            _purge_failed_session(manager, session_id)
+            message = (getattr(response, "content", b"") or b"").decode("utf-8", "replace")
+        if not _is_connection_limit_error(message):
+            self._remember_failure(views, content_type, content_uuid, stream_url, m3u_profile, message)
+        logger.warning("[Failover-Manager] %s: picked account %s still failing after %d retries, not switching",
+                       name, account, len(PICKED_RETRY_DELAYS))
+        return response
 
     def _select_after_preempt(self, orig_select, args, kwargs):
         """Every candidate account is at capacity. If Streamcache holds slots with downloads nobody
